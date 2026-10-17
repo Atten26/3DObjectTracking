@@ -67,11 +67,16 @@ class Track:
 class Tracker:
     """Feed it the detections of one frame at a time, in order."""
 
-    def __init__(self, gate=GATE, min_hits=3, max_age=3, measurement_noise=SIGMA_MEASURE):
+    def __init__(self, gate=GATE, min_hits=3, max_age=10, measurement_noise=SIGMA_MEASURE):
         self.gate = gate
         self.measurement_noise = measurement_noise
         self.min_hits = min_hits  # frames before a track is trusted enough to report
-        self.max_age = max_age  # frames a track survives without a detection
+        # Frames a track survives without a detection, i.e. one second at 10 Hz.
+        # The vulnerable occlusions are the ones a little longer than this, not the
+        # longest ones: on both our sequences the identity switches peak when the
+        # occlusion length is close to max_age. Raising it costs no false positives,
+        # because a coasting track is not reported until it is seen again.
+        self.max_age = max_age
         self.tracks = []
         self.next_id = 0
 

@@ -52,3 +52,41 @@ for sequence in ("0000", "0011"):
     assert median > 0.8, f"projection looks wrong on sequence {sequence}"
 
 print("ok")
+
+
+# --- metrics ---------------------------------------------------------------
+# Ground truth scored against itself must come out perfect; that only rules out
+# gross mistakes though, so the two cases below check that the things we actually
+# count - identity switches and misses - are counted when they are really there.
+
+from dataclasses import replace  # noqa: E402
+
+from kitti_mot.dataset import group_by_frame  # noqa: E402
+from kitti_mot.metrics import evaluate  # noqa: E402
+
+boxes = load_labels(TRAINING / "label_02" / "0000.txt")
+truth = {f: [(b.track_id, b) for b in bs] for f, bs in group_by_frame(boxes).items()}
+
+perfect = evaluate(truth, truth)
+assert perfect["MOTA"] == 1.0 and perfect["IDF1"] == 1.0 and perfect["ID switches"] == 0
+
+# two objects that both span the whole sequence, with their identities swapped halfway
+pair = {f: [(i, b) for i, b in v if i in (0, 1)] for f, v in truth.items()}
+pair = {f: v for f, v in pair.items() if len(v) == 2}
+midpoint = sorted(pair)[len(pair) // 2]
+swapped = {
+    f: [(1 - i if f >= midpoint else i, b) for i, b in v] for f, v in pair.items()
+}
+result = evaluate(pair, swapped)
+assert result["ID switches"] == 2, f"a deliberate swap went uncounted: {result}"
+assert abs(result["IDF1"] - 0.5) < 0.05, f"half of each identity is wrong, IDF1 says {result['IDF1']}"
+assert result["MOTA"] > 0.99, "a swap must not be charged as a miss or a false positive"
+
+# dropping half the frames has to show up as misses, and nothing else
+half = {f: v for f, v in truth.items() if f % 2 == 0}
+result = evaluate(truth, half)
+expected = sum(len(v) for f, v in truth.items() if f % 2)
+assert result["misses"] == expected, f"{result['misses']} misses, expected {expected}"
+assert result["false positives"] == 0 and result["ID switches"] == 0
+
+print("metrics ok")

@@ -6,6 +6,9 @@ truth 3D boxes onto the images.
 Step 2: a constant-velocity Kalman tracker that rebuilds object identities from
 geometry alone, plus the metrics to tell whether it worked.
 
+Step 3: make the fake detector fail the way real ones do - stubbornly - and find
+out what that costs.
+
 ## Setup
 
 ```bash
@@ -28,6 +31,10 @@ venv/bin/python scripts/smoke_check.py
 venv/bin/python scripts/run_tracking.py --sequence 0000
 venv/bin/python scripts/run_tracking.py --sequence 0000 --miss-rate 0.1 \
     --false-positives 0.5 --position-noise 0.25 --video
+
+# failures that persist, instead of flickering on and off every frame
+venv/bin/python scripts/run_tracking.py --sequence 0000 --miss-rate 0.2 \
+    --false-positives 1.0 --occlusion-frames 5 --ghost-frames 5
 ```
 
 The smoke check compares the axis-aligned bounding box of the projected 3D corners
@@ -87,3 +94,66 @@ Constant velocity absorbs this while the ego vehicle goes straight at a steady s
 and breaks when it turns or brakes. Compensating properly means pulling in the IMU/GPS
 `oxts` data and expressing the state in world coordinates. Not done yet, on purpose:
 the cost of not doing it is now measurable.
+
+## Persistent failures
+
+Independent per-frame noise is the easy case and it flatters the tracker. A real
+detector loses an object for as long as the truck in front stays in front, and
+hallucinates the same bush in every frame. `--occlusion-frames` and `--ghost-frames`
+set how long one failure lasts; at 1 they reproduce the independent case.
+
+The rates stay totals, so lengthening a failure makes it fire proportionally less
+often. Otherwise the comparison would be between less noise and more of it rather
+than between two shapes of the same noise. On short tracks a long occlusion gets cut
+off when the object leaves the scene, so the persistent runs actually carry slightly
+*less* missing data (14% against 20% at length 20) - which makes the damage below a
+lower bound.
+
+**`min_hits` stops protecting you.** Against independent false positives it is worth
+99%; against ones that persist it is worth almost nothing, because a ghost that holds
+still for three frames collects three hits and gets confirmed exactly like a real
+object would. Same 1.0 false positives per frame throughout:
+
+| ghost lifetime | false positives reported |
+|---|---|
+| 1 frame (independent) | 2.1 |
+| 3 frames | 80.0 |
+| 10 frames | 112.8 |
+| 20 frames | 131.0 |
+
+**The dangerous occlusion is the one just longer than `max_age`,** not the longest one.
+Identity switches peak when occlusion length is near `max_age` and fall away on both
+sides: below it the track coasts through, above it the events are rare enough not to
+matter. The peak moves when `max_age` moves, which is what tells us it is the cause
+and not a coincidence:
+
+| occlusion | `max_age=1` | `max_age=3` | `max_age=10` | `max_age=20` |
+|---|---|---|---|---|
+| ~1 frame | **0.505** | 0.831 | 0.859 | 0.859 |
+| ~3 frames | 0.523 | **0.638** | 0.854 | 0.858 |
+| ~5 frames | 0.576 | 0.646 | 0.775 | 0.814 |
+| ~10 frames | 0.659 | 0.704 | **0.759** | 0.803 |
+| ~20 frames | 0.780 | 0.785 | 0.802 | **0.815** |
+
+(IDF1, sequence 0000, 8 seeds. Bold marks each column's worst case.)
+
+**`max_age` is not free either, and its bill arrives as identity switches.** On
+perfectly clean input, raising it from 1 to 10 takes IDF1 on sequence 0000 from 1.000
+down to 0.949. False positives stay at zero - a coasting track is not reported until
+it is seen again - so the damage is invisible in that column and shows up entirely in
+the identities. When an object legitimately leaves the scene its track keeps coasting,
+and at ~0.6 m/frame it covers 6 m in ten frames, more than the 5.7 m median gap between
+objects, so it drifts onto a neighbour and steals its detection. That coasting velocity
+is mostly ego-motion, which makes this the same problem as the one below wearing a
+different hat.
+
+| | clean input | occlusions ~5 frames |
+|---|---|---|
+| `max_age=1` | **IDF1 1.000** | IDF1 0.576 |
+| `max_age=10` | IDF1 0.949 | **IDF1 0.775** |
+
+The default is 10, because a detector that never loses anything is not a thing that
+exists, and 0.05 of IDF1 on an input we will never see is worth 0.20 on one we will.
+On sequence 0011 it takes identity switches under persistent occlusion from 83.6 to
+39.4. The honest fix is not to tune this number but to stop a coasting track from
+competing for detections on equal terms with a track that can actually see its object.
