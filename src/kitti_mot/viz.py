@@ -59,14 +59,33 @@ def draw_box(image, points, color, label=None):
         cv2.putText(image, label, (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2, cv2.LINE_AA)
 
 
-def draw_frame(image, boxes, p2):
-    """Draw every box of one frame. Returns how many were skipped."""
+def draw_frame(image, tracked_boxes, p2):
+    """Draw one frame's boxes, given as (track_id, Box3D) pairs. Returns how many were skipped."""
     skipped = 0
-    for box in boxes:
+    for track_id, box in tracked_boxes:
         points = project_box(box, p2)
         if points is None:
             skipped += 1
             continue
-        color = track_color(box.track_id)
-        draw_box(image, points, color, f"{box.type[:3]} {box.track_id}")
+        draw_box(image, points, track_color(track_id), f"{box.type[:3]} {track_id}")
     return skipped
+
+
+def write_video(image_paths, boxes_by_frame, p2, out_path, fps=10.0):
+    """Burn the boxes onto the images and encode them. Returns (drawn, skipped)."""
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    # the codec wants even dimensions, otherwise it silently drops a row
+    height, width = (n - n % 2 for n in cv2.imread(str(image_paths[0])).shape[:2])
+    writer = cv2.VideoWriter(str(out_path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, height))
+
+    drawn = skipped = 0
+    for path in image_paths:
+        image = cv2.imread(str(path))[:height, :width]
+        if image.shape[:2] != (height, width):
+            image = cv2.resize(image, (width, height))
+        boxes = boxes_by_frame.get(int(path.stem), [])
+        skipped += draw_frame(image, boxes, p2)
+        drawn += len(boxes)
+        writer.write(image)
+    writer.release()
+    return drawn - skipped, skipped
